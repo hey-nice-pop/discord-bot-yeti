@@ -14,6 +14,29 @@ class Blackjack:
         deck = [{'suit': suit, 'rank': rank} for suit in suits for rank in ranks]
         random.shuffle(deck)
         return deck
+    
+    def suit_to_emoji(self, suit):
+        # スーツを絵文字に変換します。
+        return {'Hearts': '♥️', 'Diamonds': '♦️', 'Clubs': '♣️', 'Spades': '♠️'}.get(suit, suit)
+
+    def card_to_string(self, card):
+        # カードを文字列として整形します。
+        return f"{self.suit_to_emoji(card['suit'])}{card['rank']}"
+
+    def hand_to_string(self, hand):
+        # 手札のカードを文字列として整形します。
+        return ", ".join(self.card_to_string(card) for card in hand)
+    
+    def hand_to_public_string(self, hand):
+    # 最初のカード以外を公開し、最初のカードを裏向きにします。
+        if len(hand) > 1:
+            # 最初のカード以外のカードを文字列化します。
+            visible_cards = ", ".join(self.card_to_string(card) for card in hand[1:])
+            return f"[❓], {visible_cards}"
+        elif len(hand) == 1:
+            # 手札が1枚のみの場合はそのカードを裏向きにします。
+            return "[❓]"
+        return ""
 
     def reset_game(self):
         # ゲームをリセットします。
@@ -91,54 +114,52 @@ class BlackjackBot:
         if channel_id in self.games:
             del self.games[channel_id]
 
-    def suit_to_emoji(self, suit):
-        # スーツを絵文字に変換します。
-        return {'Hearts': '♥️', 'Diamonds': '♦️', 'Clubs': '♣️', 'Spades': '♠️'}.get(suit, suit)
-
-    def card_to_string(self, card):
-        # カードを文字列として整形します。
-        return f"{self.suit_to_emoji(card['suit'])}{card['rank']}"
-
-    def hand_to_string(self, hand):
-        # 手札のカードを文字列として整形します。
-        return ", ".join(self.card_to_string(card) for card in hand)
-
-    def command_bj_start(self, channel_id, user_id):
+    async def command_bj_start(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        user_id = interaction.user.name
         game = self.get_game(channel_id)
-        # ユーザーがゲームに参加し、初期カードを受け取る処理。
         if user_id in game.users:
-            return f"{user_id}はすでにゲームに参加しています。", True
+            await interaction.response.send_message(f"{user_id}はすでにゲームに参加しています。", ephemeral=True)
         else:
             game.add_user(user_id)
             hand = game.users[user_id]['hand']
             status, score = game.get_user_status(user_id)
-            return f"{user_id}がゲームに参加し、初期カードを受け取りました！\n手札: {self.hand_to_string(hand)} 現在のスコア: {score}", False
+            public_response = f"{user_id}がゲームに参加しました。公開手札: {game.hand_to_public_string(hand)}"
+            private_response = f"{user_id}がゲームに参加し、初期カードを受け取りました！\nあなたの手札: {game.hand_to_string(hand)} スコア: {score}"
+            
+            await interaction.response.send_message(public_response, ephemeral=False)  # 公開メッセージを最初に送信
+            await interaction.followup.send(private_response, ephemeral=True)  # 個人メッセージをフォローアップとして送信
 
-    def command_bj_hit(self, channel_id, user_id):
+    async def command_bj_hit(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        user_id = interaction.user.name
         game = self.get_game(channel_id)
-        # ユーザーがカードを一枚引く処理。
         if user_id not in game.users:
-            return f"{user_id}はゲームに参加していません。", True
+            await interaction.response.send_message(f"{user_id}はゲームに参加していません。", ephemeral=True)
+            return
         if game.users[user_id]['status'] == 'playing':
             card = game.deal_card(user_id)
             hand = game.users[user_id]['hand']
             status, score = game.get_user_status(user_id)
             if status == 'bust':
-                return f"{user_id}はバーストしました！引いたカード: {self.card_to_string(card)}\n手札: {self.hand_to_string(hand)} スコア: {score}", False
+                public_response = f"{user_id}はバーストしました！公開手札: {game.hand_to_public_string(hand)} スコア: {score}"
+                await interaction.response.send_message(public_response, ephemeral=False)
             else:
-                return f"{user_id}がカードを引きました: {self.card_to_string(card)}\n手札: {self.hand_to_string(hand)} 現在のスコア: {score}", False
+                private_response = f"あなたが引いたカード: {game.card_to_string(card)}\nあなたの全手札: {game.hand_to_string(hand)} スコア: {score}"
+                public_response = f"{user_id}がカードを引きました。公開手札: {game.hand_to_public_string(hand)}"
+                await interaction.response.send_message(public_response, ephemeral=False)  # まず公開情報を送信
+                await interaction.followup.send(private_response, ephemeral=True)  # 次に個人情報を送信
         else:
-            return f"{user_id}はすでにバーストしています。", True
+            await interaction.response.send_message(f"{user_id}はすでにバーストしています。", ephemeral=True)
 
     def command_bj_allstand(self, channel_id):
         game = self.get_game(channel_id)
-        # 全員がスタンドし、ゲームを終了する処理。勝者を決定します。
         if not game.users:
             return "ゲームが開始されていません。", True
 
         active_players = [user_id for user_id, info in game.users.items() if info['status'] != 'bust']
         if not active_players:
-            self.end_game(channel_id)  # ゲームを終了します。
+            self.end_game(channel_id)
             return "勝者なし、全員バーストしました。", False
 
         winners = []
@@ -152,40 +173,43 @@ class BlackjackBot:
                 winners.append(user_id)
 
         if len(winners) == 1:
-            response = f"勝者: {winners[0]} スコア: {highest_score}!"
+            winner_id = winners[0]
+            winner_hand = game.hand_to_string(game.users[winner_id]['hand'])
+            response = f"勝者: {winner_id} スコア: {highest_score}!\n勝者の手札: {winner_hand}"
         elif len(winners) > 1:
-            response = f"引き分けです！勝者: {', '.join(winners)} スコア: {highest_score}"
+            winner_hands = {winner: game.hand_to_string(game.users[winner]['hand']) for winner in winners}
+            winner_details = '\n'.join(f"{winner} の手札: {hands}" for winner, hands in winner_hands.items())
+            response = f"引き分けです！勝者: {', '.join(winners)} スコア: {highest_score}\n{winner_details}"
         else:
             response = "勝者なし、全員バーストしました。"
 
-        self.end_game(channel_id)  # ゲームを終了します。
+        self.end_game(channel_id)
         return response, False
-    
-    def command_bj_show(self, channel_id, user_id):
+
+    async def command_bj_show(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        user_id = interaction.user.name
         game = self.get_game(channel_id)
-        # ユーザーがゲームに参加しているかを確認します。
         if user_id not in game.users:
-            return f"{user_id}はゲームに参加していません。", True
+            await interaction.response.send_message(f"{user_id}はゲームに参加していません。", ephemeral=True)
+            return
 
         hand = game.users[user_id]['hand']
         score = game.users[user_id]['score']
-        return f"{user_id}の現在の手札: {self.hand_to_string(hand)} スコア: {score}", False
-
+        response = f"{user_id}の現在の手札: {game.hand_to_string(hand)} スコア: {score}"
+        await interaction.response.send_message(response, ephemeral=True)
 
 def setup(bot):
     blackjack_bot = BlackjackBot(bot)
 
     @bot.tree.command(name='bj_start', description='ブラックジャックゲームを開始または参加します')
     async def start(interaction: discord.Interaction):
-        channel_id = interaction.channel_id
-        response, ephemeral = blackjack_bot.command_bj_start(channel_id, interaction.user.name)
-        await interaction.response.send_message(response, ephemeral=ephemeral)
+        await blackjack_bot.command_bj_start(interaction)
+
 
     @bot.tree.command(name='bj_hit', description='カードをもう一枚引きます')
     async def hit(interaction: discord.Interaction):
-        channel_id = interaction.channel_id
-        response, ephemeral = blackjack_bot.command_bj_hit(channel_id, interaction.user.name)
-        await interaction.response.send_message(response, ephemeral=ephemeral)
+        await blackjack_bot.command_bj_hit(interaction)
 
     @bot.tree.command(name='bj_allstand', description='ゲームを終了し、勝者を表示します')
     async def allstand(interaction: discord.Interaction):
@@ -195,7 +219,5 @@ def setup(bot):
 
     @bot.tree.command(name='bj_show', description='現在の手札を表示します')
     async def show(interaction: discord.Interaction):
-        channel_id = interaction.channel_id
-        response, ephemeral = blackjack_bot.command_bj_show(channel_id, interaction.user.name)
-        await interaction.response.send_message(response, ephemeral=ephemeral)
+        await blackjack_bot.command_bj_show(interaction)
 
