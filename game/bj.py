@@ -142,7 +142,7 @@ class BlackjackBot:
             hand = game.users[user_id]['hand']
             status, score = game.get_user_status(user_id)
             if status == 'bust':
-                public_response = f"{user_id}はバーストしました！公開手札: {game.hand_to_public_string(hand)} スコア: {score}"
+                public_response = f"{user_id}はバーストしました！公開手札: {game.hand_to_string(hand)} スコア: {score}"
                 await interaction.response.send_message(public_response, ephemeral=False)
             else:
                 private_response = f"あなたが引いたカード: {game.card_to_string(card)}\nあなたの全手札: {game.hand_to_string(hand)} スコア: {score}"
