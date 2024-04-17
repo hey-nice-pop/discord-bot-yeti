@@ -1,7 +1,7 @@
-# Discord Bot (stone)
+# Discord Bot
 Blackjack Discord bot
 
-## 動作に必要
+## Installation
 - discord.py
 - python-dotenv
 ```bash
