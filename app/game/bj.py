@@ -11,7 +11,7 @@ class Blackjack:
     デッキ、ポット、プレイヤーの状態を管理します。
     """
 
-    def __init__(self, initial_coins: int = 100, tz_offset_hours: int = 9):
+    def __init__(self, initial_coins: int = 30, tz_offset_hours: int = 9):
         # 新しいデッキを作成してシャッフルします
         self.deck = self.create_deck()
         # user_id からプレイヤー状態へのマッピング
@@ -121,17 +121,20 @@ class Blackjack:
             'bet': 1,
             'has_raised': False,
             'is_folded': False,
+            'natural_bonus': 0,  # ナチュラルBJボーナス（Aと10点カード：10/J/Q/K）があれば後で設定
         }
         # ポットにベット額を追加
         self.pot += 1
         # 最初のカードを配る
         self.deal_initial_cards(user_id)
-        # ナチュラルブラックジャック（A + 絵札）の場合はボーナスコインを付与
+        # ナチュラルブラックジャック（A と 10 点カード）の場合はボーナスを記録するが
+        # コインの付与はラウンド終了時に行う
         hand = self.users[user_id]['hand']
         ranks = {card['rank'] for card in hand}
         if 'A' in ranks and any(r in ranks for r in ['J', 'Q', 'K', '10']):
-            # ボーナスとして 1 コインを付与
-            self.users[user_id]['coins'] += 1
+            bonus = 5
+            # コインには反映せず natural_bonus に記録しておく
+            self.users[user_id]['natural_bonus'] = bonus
         return True
 
     def deal_initial_cards(self, user_id: str):
@@ -201,16 +204,17 @@ class Blackjack:
         """
         if raiser_id not in self.users:
             return 0
-        # The raiser cannot raise more than they have
+        # レイズ額はレイズするプレイヤー自身の所持コインを超えない
         raiser_coins = self.users[raiser_id]['coins']
-        # Consider only active players (not folded/bust) to compute the
-        # maximum call value they can match
+        # フォールド/バーストしていない他プレイヤーの最小所持コインを上限計算に使う
         active_players = [uid for uid, state in self.users.items()
                           if not state['is_folded'] and uid != raiser_id]
         if not active_players:
             return raiser_coins
         min_other_coins = min(self.users[uid]['coins'] for uid in active_players)
-        return min(raiser_coins if raiser_coins <= min_other_coins else min_other_coins)
+        # レイズ額の上限は、他のアクティブプレイヤーの最小所持コイン - 1 に合わせる（0 未満にはしない）
+        max_by_others = max(0, min_other_coins - 1)
+        return max(0, min(raiser_coins, max_by_others))
 
     def start_raise(self, raiser_id: str, amount: int) -> bool:
         """
@@ -228,12 +232,12 @@ class Blackjack:
             return False
         if player['coins'] < amount:
             return False
-        # Deduct coins and update bet
+        # レイズ額を差し引いてベットを更新
         player['coins'] -= amount
         player['bet'] += amount
-        # Increase pot by the raise amount (only the raiser's contribution for now)
+        # レイズした本人の分だけポットを増額
         self.pot += amount
-        # Set current raise value to inform callers
+        # 現在のレイズ額を記録して他プレイヤーの判断に使う
         self.current_raise = amount
         player['has_raised'] = True
         return True
@@ -250,22 +254,20 @@ class Blackjack:
         player = self.users[user_id]
         if player['is_folded'] or player['status'] != 'playing':
             return False
-        # There must be an active raise
+        # 進行中のレイズがあることを確認
         if self.current_raise <= 0:
             return False
         if action == 'call':
-            # Ensure the player has enough coins to call
+            # コールに必要なコインを持っているか確認
             if player['coins'] < self.current_raise:
                 return False
             player['coins'] -= self.current_raise
             player['bet'] += self.current_raise
             self.pot += self.current_raise
-            # They remain in the game
+            # コールした場合はゲームに残る
             return True
         elif action == 'fold':
-            # Player forfeits further participation but does not lose
-            # additional coins beyond their current bet. We don't deduct
-            # anything else here.
+            # フォールドすると以後参加しないが、現在のベット以上は失わない（追加の差し引きなし）
             player['status'] = 'fold'
             player['is_folded'] = True
             return True
@@ -280,7 +282,7 @@ class Blackjack:
         self.current_raise = 0
 
     # ------------------------------------------------------------------
-    # Round resolution
+    # ラウンドの決着処理
     # ------------------------------------------------------------------
     def resolve_round(self):
         """
@@ -289,51 +291,58 @@ class Blackjack:
         （user_id、手札、スコア、最終コイン、増減）を格納した辞書のリストです。
         すべてのプレイヤーがバーストした場合、ベットは返却されコインは没収されません。
         """
+        # 結果リストを初期化
         results = []
-        # Identify active players (not folded/bust)
+        # ラウンド開始時の各プレイヤーのコイン残高を記録する（ベットやボーナスを加算する前）
+        initial_coins = {uid: state['coins'] for uid, state in self.users.items()}
+        # 現在アクティブなプレイヤー（バーストやフォールドしていないプレイヤー）を取得
         active_players = [uid for uid, state in self.users.items()
                           if state['status'] in ['playing', 'stand'] and not state['is_folded']]
-        # Identify any players who busted
-        bust_players = [uid for uid, state in self.users.items() if state['status'] == 'bust']
-        # If no active players remain, everyone busted or folded
+        # 全員がバーストまたはフォールドしている場合の処理
         if not active_players:
-            # Refund each player's bet
+            # 各プレイヤーにベットを返却する。全員がバーストまたはフォールドしている
+            # 場合はナチュラルBJボーナスは付与しません。
             for uid, state in self.users.items():
+                # ベットの返却
                 state['coins'] += state['bet']
                 state['bet'] = 0
+            # ポットは空になる
             self.pot = 0
+            # 結果メッセージ
             message = "勝者なし、全員バーストしました。"
-            # Compose summary
+            # 各プレイヤーの増減を計算して結果リストに追加
             for uid, state in self.users.items():
+                change = state['coins'] - initial_coins[uid]
                 results.append({
                     'user_id': uid,
                     'hand': self.hand_to_string(state['hand']),
                     'score': state['score'],
                     'final_coins': state['coins'],
-                    'change': 0
+                    'change': change,
+                    'natural_bonus': state.get('natural_bonus', 0),
                 })
-            # Reset the game state for the next round
+            # 次のラウンドのために状態をリセット
             self.reset_game()
             return message, results
-        # Compute highest score among active players
-        highest_score = 0
-        for uid in active_players:
-            score = self.users[uid]['score']
-            if score > highest_score:
-                highest_score = score
-        # Determine winners (could be multiple)
+
+        # アクティブプレイヤーがいる場合は勝者を決定
+        # 最も高いスコアを求め、同点のプレイヤーを勝者リストとする
+        highest_score = max(self.users[uid]['score'] for uid in active_players)
         winners = [uid for uid in active_players if self.users[uid]['score'] == highest_score]
-        # Distribute pot evenly among winners. Any leftover coins are
-        # distributed one by one starting from the first winner.
+        # ポットを勝者で均等に分け、余りがあれば順番に1枚ずつ追加する
         share = self.pot // len(winners)
         remainder = self.pot % len(winners)
-        # Record the initial coins before distribution to compute change
-        initial_coins = {uid: state['coins'] for uid, state in self.users.items()}
         for i, uid in enumerate(winners):
             self.users[uid]['coins'] += share
             if i < remainder:
                 self.users[uid]['coins'] += 1
-        # Compute change for each player and build result summary
+        # ナチュラルBJボーナスがある場合はここで付与する
+        for uid, state in self.users.items():
+            bonus = state.get('natural_bonus', 0)
+            # バーストまたはフォールドしていないプレイヤーのみボーナスを受け取る
+            if bonus and state['status'] != 'bust' and not state['is_folded']:
+                state['coins'] += bonus
+        # 各プレイヤーの増減を計算して結果リストに追加
         for uid, state in self.users.items():
             change = state['coins'] - initial_coins[uid]
             results.append({
@@ -341,30 +350,43 @@ class Blackjack:
                 'hand': self.hand_to_string(state['hand']),
                 'score': state['score'],
                 'final_coins': state['coins'],
-                'change': change
+                'change': change,
+                'natural_bonus': state.get('natural_bonus', 0),
             })
-        # Construct human readable message
+        # 勝者メッセージを構築
         if len(winners) == 1:
             message = f"勝者: {winners[0]} スコア: {highest_score}!"
         else:
             winners_str = ", ".join(winners)
             message = f"引き分けです！勝者: {winners_str} スコア: {highest_score}"
-        # Reset game for next round
+        # 次のラウンドのために状態をリセット
         self.reset_game()
         return message, results
 
     def reset_game(self):
-        """ゲームの状態をリセットしますが、プレイヤーとそのコイン残高は保持します。"""
+        """
+        ゲームの状態をリセットしますが、プレイヤーとそのコイン残高は保持します。
+
+        ラウンドが終了した後も同じ ``Blackjack`` インスタンスを使い続けるため、各
+        プレイヤーの手札やスコア、ベットなどはクリアします。ただしプレイヤーは
+        ``ready`` ステータスにしておき、次のラウンドを開始できる状態にします。
+        デッキやポット、現在のレイズ額も初期化します。
+        """
+        # 新しいデッキを用意し、ポットやレイズ額をリセット
         self.deck = self.create_deck()
         self.pot = 0
         self.current_raise = 0
+        # 各プレイヤーの状態をクリアする
         for state in self.users.values():
             state['hand'] = []
             state['score'] = 0
-            state['status'] = 'playing'
+            # ラウンド終了後は ready 状態にして次のラウンドを開始できるようにする
+            state['status'] = 'ready'
             state['bet'] = 0
             state['has_raised'] = False
             state['is_folded'] = False
+            # ナチュラルBJボーナスをリセット
+            state['natural_bonus'] = 0
 
 
 class BlackjackBot:
@@ -393,6 +415,19 @@ class BlackjackBot:
         if channel_id in self.games:
             del self.games[channel_id]
 
+    def find_active_channel_for_user(self, user_id: str, exclude_channel: int | None = None):
+        """
+        指定ユーザーが進行中のラウンドに参加しているチャンネルIDを返します。
+        ready 状態以外（ラウンド未終了）の場合に参加中とみなします。
+        exclude_channel を指定すると、そのチャンネルは探索対象から除外します。
+        """
+        for cid, game in self.games.items():
+            if exclude_channel is not None and cid == exclude_channel:
+                continue
+            if user_id in game.users and game.users[user_id]['status'] != 'ready':
+                return cid
+        return None
+
     # ------------------------------------------------------------------
     # コマンド
     # ------------------------------------------------------------------
@@ -400,29 +435,99 @@ class BlackjackBot:
         channel_id = interaction.channel_id
         # 表示名を使用
         user_id = interaction.user.display_name
+        # 別チャンネルで進行中のラウンドに参加している場合は拒否
+        active_other = self.find_active_channel_for_user(user_id, exclude_channel=channel_id)
+        if active_other is not None:
+            await interaction.response.send_message(
+                f"{user_id}は別のチャンネル(ID: {active_other})でラウンド進行中です。"
+                "先にそちらを終了してください。",
+                ephemeral=True
+            )
+            return
         game = self.get_game(channel_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
-        # ユーザーがすでに参加していないか、十分なカードがあるかを確認
+        # 既にユーザーが存在する場合は次のラウンドへの再参加として扱う
         if user_id in game.users:
-            await interaction.response.send_message(f"{user_id}はすでにゲームに参加しています。",
-                                                   ephemeral=True)
+            player = game.users[user_id]
+            # 現在のステータスが playing または stand であり手札が残っている場合はラウンド継続中
+            if player['status'] in ['playing', 'stand'] and player['hand']:
+                await interaction.response.send_message(
+                    f"{user_id}はすでにゲームに参加しています。",
+                    ephemeral=True
+                )
+                return
+            # デッキに十分なカードがあるか確認
+            if len(game.deck) < 2:
+                await interaction.response.send_message(
+                    "山札の残りカードが不足しているため新しいラウンドを開始できません。",
+                    ephemeral=True
+                )
+                return
+            # 十分なコインがあるか確認
+            if player['coins'] < 1:
+                await interaction.response.send_message(
+                    f"{user_id}は所持コインが不足しているため新しいラウンドに参加できません。",
+                    ephemeral=True
+                )
+                return
+            # 新しいラウンドとしてベットを差し引き、ステータスを初期化しカードを配る
+            player['coins'] -= 1
+            player['bet'] = 1
+            player['status'] = 'playing'
+            player['has_raised'] = False
+            player['is_folded'] = False
+            player['hand'] = []
+            player['score'] = 0
+            player['natural_bonus'] = 0
+            # ポットにベットを追加
+            game.pot += 1
+            # 初期カードを配る
+            game.deal_initial_cards(user_id)
+            # ナチュラルBJ（A と 10 点カード）の場合はボーナスを記録するのみで、
+            # コインはラウンド終了時に付与する
+            hand = player['hand']
+            ranks = {card['rank'] for card in hand}
+            if 'A' in ranks and any(r in ranks for r in ['J', 'Q', 'K', '10']):
+                bonus = 5
+                player['natural_bonus'] = bonus
+            # メッセージを作成
+            score = player['score']
+            coins = player['coins']
+            public_response = (
+                f"{user_id}が新しいラウンドに参加しました。公開手札: "
+                f"{game.hand_to_public_string(hand)} | 所持コイン: {coins}"
+            )
+            private_response = (
+                f"{user_id}が新しいラウンドに参加し、初期カードを受け取りました！\n"
+                f"あなたの手札: {game.hand_to_string(hand)} スコア: {score}\n"
+                f"現在の所持コイン: {coins}"
+            )
+            await interaction.response.send_message(public_response, ephemeral=False)
+            await interaction.followup.send(private_response, ephemeral=True)
             return
-        # ゲームにユーザーを追加できるか試みる
+        # 新規参加者の場合は通常の参加処理
         if not game.add_user(user_id):
             # カードやコインが足りない場合
-            await interaction.response.send_message(f"{user_id}はゲームに参加できません。山札の残りカードまたはコインが不足しています。",
-                                                   ephemeral=True)
+            await interaction.response.send_message(
+                f"{user_id}はゲームに参加できません。山札の残りカードまたはコインが不足しています。",
+                ephemeral=True
+            )
             return
         # メッセージを準備
         hand = game.users[user_id]['hand']
         score = game.users[user_id]['score']
         coins = game.users[user_id]['coins']
-        public_response = (f"{user_id}がゲームに参加しました。公開手札: "
-                           f"{game.hand_to_public_string(hand)}")
-        private_response = (f"{user_id}がゲームに参加し、初期カードを受け取りました！\n"
-                            f"あなたの手札: {game.hand_to_string(hand)} スコア: {score}\n"
-                            f"現在の所持コイン: {coins}")
+        # 公開メッセージにも所持コインを表示する
+        public_response = (
+            f"{user_id}がゲームに参加しました。公開手札: "
+            f"{game.hand_to_public_string(hand)} | 所持コイン: {coins}"
+        )
+        private_response = (
+            f"{user_id}がゲームに参加し、初期カードを受け取りました！\n"
+            f"あなたの手札: {game.hand_to_string(hand)} スコア: {score}\n"
+            f"現在の所持コイン: {coins}"
+        )
         await interaction.response.send_message(public_response, ephemeral=False)
         await interaction.followup.send(private_response, ephemeral=True)
 
@@ -509,8 +614,10 @@ class BlackjackBot:
         # 許可される最大レイズ額を計算
         max_raise = game.calculate_max_raise(user_id)
         if max_raise <= 0:
-            await interaction.response.send_message("レイズできません。所持コインが不足しています。",
-                                                   ephemeral=True)
+            await interaction.response.send_message(
+                "これ以上レイズできません（最大値に達しています）。",
+                ephemeral=True
+            )
             return
         # レイズ額が有効か検証
         if amount < 1 or amount > max_raise:
@@ -525,7 +632,14 @@ class BlackjackBot:
                                                    ephemeral=True)
             return
         # 他のアクティブなプレイヤーのリストを作成
-        other_players = [uid for uid in game.users.keys() if uid != user_id and not game.users[uid]['is_folded']]
+        # 現在のラウンドに参加している他プレイヤーを取得する。
+        # ``ready`` 状態のプレイヤーは今回のラウンドに参加していないため除外する。
+        other_players = [
+            uid for uid, state in game.users.items()
+            if uid != user_id
+            and not state['is_folded']
+            and state['status'] in ['playing', 'stand']
+        ]
         # 各プレイヤーのコインと手札を含む公開メッセージを作成
         player_states = []
         for uid, state in game.users.items():
@@ -582,10 +696,22 @@ class BlackjackBot:
                 ephemeral=True
             )
             return
+        # 進行中のラウンド（playing/stand で手札あり）が存在しない場合は拒否
+        active_round_players = [
+            state for state in game.users.values()
+            if state['status'] in ['playing', 'stand'] and state['hand']
+        ]
+        if not active_round_players:
+            await interaction.response.send_message(
+                "進行中のラウンドがありません。まず bj_start でラウンドを開始してください。",
+                ephemeral=True
+            )
+            return
         # ラウンドを解決して結果を取得
         message, summary = game.resolve_round()
         # 詳細な結果メッセージを作成
         result_lines = [message]
+        # プレイヤーごとの結果行を組み立て、BJボーナスを含める
         for result in summary:
             uid = result['user_id']
             hand = result['hand']
@@ -593,15 +719,21 @@ class BlackjackBot:
             final_coins = result['final_coins']
             change = result['change']
             change_str = f"{change:+d}"
+            nat_bonus = result.get('natural_bonus', 0)
+            bonus_str = f" | BJボーナス: +{nat_bonus}" if nat_bonus > 0 else ""
             result_lines.append(
-                f"{uid}: 手札: {hand} | スコア: {score} | 最終コイン: {final_coins} ({change_str})"
+                f"{uid}: 手札: {hand} | スコア: {score} | 最終コイン: {final_coins} ({change_str}){bonus_str}"
+            )
+        # ナチュラルBJボーナスが含まれている場合、説明を追加
+        if any(r.get('natural_bonus', 0) > 0 for r in summary):
+            result_lines.append(
+                "※ 初手がブラックジャック（Aと10点カード：10/J/Q/K）の場合、システムから5コインが付与されます。"
             )
         await interaction.response.send_message(
             "\n".join(result_lines),
             ephemeral=False
         )
-        # このチャンネルのゲームを終了
-        self.end_game(channel_id)
+        # resolve_round 内でゲーム状態はリセットされるため、ゲームインスタンスは保持します
 
     async def command_bj_show(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
@@ -665,8 +797,7 @@ class BlackjackBot:
             # 結果をチャンネルへ送信
             await interaction.followup.send("\n".join(result_lines),
                                            ephemeral=False)
-            # ゲームを終了
-            self.end_game(channel_id)
+            # resolve_round でゲーム状態はリセットされるため、ゲームインスタンスは保持します
 
 
 class CallFoldView(discord.ui.View):
@@ -744,7 +875,7 @@ class CallFoldView(discord.ui.View):
         self.game.clear_raise()
 
 # ----------------------------------------------------------------------
-# Command registration
+# コマンド登録
 # ----------------------------------------------------------------------
 def setup(bot: discord.Client):
     """
