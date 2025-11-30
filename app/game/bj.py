@@ -11,7 +11,7 @@ class Blackjack:
     デッキ、ポット、プレイヤーの状態を管理します。
     """
 
-    def __init__(self, initial_coins: int = 30, tz_offset_hours: int = 9):
+    def __init__(self, initial_coins: int = 30, tz_offset_hours: int = 9, wallet_store: dict | None = None):
         # 新しいデッキを作成してシャッフルします
         self.deck = self.create_deck()
         # user_id からプレイヤー状態へのマッピング
@@ -23,12 +23,14 @@ class Blackjack:
         self.pot = 0
         # 現在のラウンドでレイズされた額（アクティブなレイズがない場合は 0）
         self.current_raise = 0
-        # コイン残高を最後にリセットした日付
-        self.last_reset_date = None
         # 毎日開始時のコイン数
         self.initial_coins = initial_coins
         # タイムゾーンオフセット（東京は +9 時間）
         self.tz_offset = timedelta(hours=tz_offset_hours)
+        # サーバー共有のウォレット（guild 単位で共有される想定）
+        self.wallet_store = wallet_store if wallet_store is not None else {}
+        # ウォレット全体の最終リセット日をメタデータで持つ
+        self._wallet_last_reset_key = "__last_reset_date__"
 
     # ------------------------------------------------------------------
     # デッキおよびカード関連の補助メソッド
@@ -71,6 +73,35 @@ class Blackjack:
         local_time = now_utc + self.tz_offset
         return local_time.date()
 
+    # ------------------------------------------------------------------
+    # ウォレット管理（サーバー共通コイン）
+    # ------------------------------------------------------------------
+    def _wallet_entry(self, user_id: str) -> dict:
+        """ユーザーのウォレットエントリ（coins を含む辞書）を取得・初期化します。"""
+        if user_id not in self.wallet_store:
+            self.wallet_store[user_id] = {'coins': self.initial_coins}
+        return self.wallet_store[user_id]
+
+    def _get_coins(self, user_id: str) -> int:
+        """ウォレットからコイン残高を取得し、ユーザーステートにも反映します。"""
+        entry = self._wallet_entry(user_id)
+        if user_id in self.users:
+            self.users[user_id]['coins'] = entry['coins']
+        return entry['coins']
+
+    def _set_coins(self, user_id: str, amount: int):
+        """ウォレットとユーザーステートの両方にコイン残高を設定します。"""
+        entry = self._wallet_entry(user_id)
+        entry['coins'] = amount
+        if user_id in self.users:
+            self.users[user_id]['coins'] = amount
+
+    def _adjust_coins(self, user_id: str, delta: int) -> int:
+        """指定量だけコインを増減させ、新しい残高を返します。"""
+        new_amount = self._get_coins(user_id) + delta
+        self._set_coins(user_id, new_amount)
+        return new_amount
+
     def check_and_reset_coins(self):
         """
         日付が変わった場合（東京タイムゾーン基準）、すべてのプレイヤーの
@@ -78,12 +109,17 @@ class Blackjack:
         各コマンド実行時に呼び出してください。
         """
         current_date = self._current_local_date()
-        if self.last_reset_date is None or current_date > self.last_reset_date:
+        last_reset_date = self.wallet_store.get(self._wallet_last_reset_key)
+        if last_reset_date is None or current_date > last_reset_date:
             # 進行中のゲームを壊さないように、各プレイヤーのベットおよび
             # ポットへの貢献は維持したまま、所持コインのみ初期値に戻します。
-            for state in self.users.values():
-                state['coins'] = self.initial_coins
-            self.last_reset_date = current_date
+            for uid, entry in self.wallet_store.items():
+                if uid == self._wallet_last_reset_key:
+                    continue
+                entry['coins'] = self.initial_coins
+                if uid in self.users:
+                    self.users[uid]['coins'] = self.initial_coins
+            self.wallet_store[self._wallet_last_reset_key] = current_date
 
     # ------------------------------------------------------------------
     # プレイヤー管理
@@ -107,8 +143,8 @@ class Blackjack:
         self.check_and_reset_coins()
         if not self.can_join(user_id):
             return False
-        # 新規ユーザー参加時の初期所持コインを決定
-        coins = self.initial_coins
+        # サーバー共通ウォレットから所持コインを取得（未登録なら初期値で作成）
+        coins = self._get_coins(user_id)
         # ベットを支払えるだけのコインがある場合のみ参加を許可
         if coins < 1:
             return False
@@ -117,12 +153,14 @@ class Blackjack:
             'hand': [],
             'score': 0,
             'status': 'playing',
-            'coins': coins - 1,  # 初期ベット分を差し引く
+            'coins': coins - 1,  # 初期ベット分を差し引く（ウォレット側でも同期させる）
             'bet': 1,
             'has_raised': False,
             'is_folded': False,
             'natural_bonus': 0,  # ナチュラルBJボーナス（Aと10点カード：10/J/Q/K）があれば後で設定
         }
+        # ウォレットからも初期ベット分を差し引く
+        self._set_coins(user_id, coins - 1)
         # ポットにベット額を追加
         self.pot += 1
         # 最初のカードを配る
@@ -205,13 +243,13 @@ class Blackjack:
         if raiser_id not in self.users:
             return 0
         # レイズ額はレイズするプレイヤー自身の所持コインを超えない
-        raiser_coins = self.users[raiser_id]['coins']
+        raiser_coins = self._get_coins(raiser_id)
         # フォールド/バーストしていない他プレイヤーの最小所持コインを上限計算に使う
         active_players = [uid for uid, state in self.users.items()
                           if not state['is_folded'] and uid != raiser_id]
         if not active_players:
             return raiser_coins
-        min_other_coins = min(self.users[uid]['coins'] for uid in active_players)
+        min_other_coins = min(self._get_coins(uid) for uid in active_players)
         # レイズ額の上限は、他のアクティブプレイヤーの最小所持コイン - 1 に合わせる（0 未満にはしない）
         max_by_others = max(0, min_other_coins - 1)
         return max(0, min(raiser_coins, max_by_others))
@@ -230,10 +268,10 @@ class Blackjack:
         max_raise = self.calculate_max_raise(raiser_id)
         if amount < 1 or amount > max_raise:
             return False
-        if player['coins'] < amount:
+        if self._get_coins(raiser_id) < amount:
             return False
         # レイズ額を差し引いてベットを更新
-        player['coins'] -= amount
+        self._adjust_coins(raiser_id, -amount)
         player['bet'] += amount
         # レイズした本人の分だけポットを増額
         self.pot += amount
@@ -259,9 +297,9 @@ class Blackjack:
             return False
         if action == 'call':
             # コールに必要なコインを持っているか確認
-            if player['coins'] < self.current_raise:
+            if self._get_coins(user_id) < self.current_raise:
                 return False
-            player['coins'] -= self.current_raise
+            self._adjust_coins(user_id, -self.current_raise)
             player['bet'] += self.current_raise
             self.pot += self.current_raise
             # コールした場合はゲームに残る
@@ -294,7 +332,7 @@ class Blackjack:
         # 結果リストを初期化
         results = []
         # ラウンド開始時の各プレイヤーのコイン残高を記録する（ベットやボーナスを加算する前）
-        initial_coins = {uid: state['coins'] for uid, state in self.users.items()}
+        initial_coins = {uid: self._get_coins(uid) for uid, state in self.users.items()}
         # 現在アクティブなプレイヤー（バーストやフォールドしていないプレイヤー）を取得
         active_players = [uid for uid, state in self.users.items()
                           if state['status'] in ['playing', 'stand'] and not state['is_folded']]
@@ -304,7 +342,7 @@ class Blackjack:
             # 場合はナチュラルBJボーナスは付与しません。
             for uid, state in self.users.items():
                 # ベットの返却
-                state['coins'] += state['bet']
+                self._adjust_coins(uid, state['bet'])
                 state['bet'] = 0
             # ポットは空になる
             self.pot = 0
@@ -312,12 +350,12 @@ class Blackjack:
             message = "勝者なし、全員バーストしました。"
             # 各プレイヤーの増減を計算して結果リストに追加
             for uid, state in self.users.items():
-                change = state['coins'] - initial_coins[uid]
+                change = self._get_coins(uid) - initial_coins[uid]
                 results.append({
                     'user_id': uid,
                     'hand': self.hand_to_string(state['hand']),
                     'score': state['score'],
-                    'final_coins': state['coins'],
+                    'final_coins': self._get_coins(uid),
                     'change': change,
                     'natural_bonus': state.get('natural_bonus', 0),
                 })
@@ -333,23 +371,23 @@ class Blackjack:
         share = self.pot // len(winners)
         remainder = self.pot % len(winners)
         for i, uid in enumerate(winners):
-            self.users[uid]['coins'] += share
+            self._adjust_coins(uid, share)
             if i < remainder:
-                self.users[uid]['coins'] += 1
+                self._adjust_coins(uid, 1)
         # ナチュラルBJボーナスがある場合はここで付与する
         for uid, state in self.users.items():
             bonus = state.get('natural_bonus', 0)
             # バーストまたはフォールドしていないプレイヤーのみボーナスを受け取る
             if bonus and state['status'] != 'bust' and not state['is_folded']:
-                state['coins'] += bonus
+                self._adjust_coins(uid, bonus)
         # 各プレイヤーの増減を計算して結果リストに追加
         for uid, state in self.users.items():
-            change = state['coins'] - initial_coins[uid]
+            change = self._get_coins(uid) - initial_coins[uid]
             results.append({
                 'user_id': uid,
                 'hand': self.hand_to_string(state['hand']),
                 'score': state['score'],
-                'final_coins': state['coins'],
+                'final_coins': self._get_coins(uid),
                 'change': change,
                 'natural_bonus': state.get('natural_bonus', 0),
             })
@@ -400,14 +438,21 @@ class BlackjackBot:
         self.bot = bot
         # チャンネルIDからゲームインスタンスへのマッピング
         self.games: dict[int, Blackjack] = {}
+        # サーバー（ギルド）ごとの共有ウォレット
+        self.wallets: dict[int | str, dict] = {}
+        # チャンネルが属するギルドの記録
+        self.channel_guild: dict[int, int | None] = {}
 
     # ------------------------------------------------------------------
     # 補助メソッド
     # ------------------------------------------------------------------
-    def get_game(self, channel_id: int) -> Blackjack:
+    def get_game(self, channel_id: int, guild_id: int | None = None) -> Blackjack:
         """指定されたチャンネルに対応するブラックジャックゲームを取得、または新規作成します。"""
+        wallet_key = guild_id if guild_id is not None else "__global__"
+        wallet_store = self.wallets.setdefault(wallet_key, {})
         if channel_id not in self.games:
-            self.games[channel_id] = Blackjack()
+            self.games[channel_id] = Blackjack(wallet_store=wallet_store)
+        self.channel_guild[channel_id] = guild_id
         return self.games[channel_id]
 
     def end_game(self, channel_id: int):
@@ -415,14 +460,17 @@ class BlackjackBot:
         if channel_id in self.games:
             del self.games[channel_id]
 
-    def find_active_channel_for_user(self, user_id: str, exclude_channel: int | None = None):
+    def find_active_channel_for_user(self, user_id: str, exclude_channel: int | None = None, guild_id: int | None = None):
         """
         指定ユーザーが進行中のラウンドに参加しているチャンネルIDを返します。
         ready 状態以外（ラウンド未終了）の場合に参加中とみなします。
         exclude_channel を指定すると、そのチャンネルは探索対象から除外します。
+        guild_id を指定すると同一ギルド内のみ探索します。
         """
         for cid, game in self.games.items():
             if exclude_channel is not None and cid == exclude_channel:
+                continue
+            if guild_id is not None and self.channel_guild.get(cid) != guild_id:
                 continue
             if user_id in game.users and game.users[user_id]['status'] != 'ready':
                 return cid
@@ -433,10 +481,11 @@ class BlackjackBot:
     # ------------------------------------------------------------------
     async def command_bj_start(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
+        guild_id = interaction.guild_id
         # 表示名を使用
         user_id = interaction.user.display_name
         # 別チャンネルで進行中のラウンドに参加している場合は拒否
-        active_other = self.find_active_channel_for_user(user_id, exclude_channel=channel_id)
+        active_other = self.find_active_channel_for_user(user_id, exclude_channel=channel_id, guild_id=guild_id)
         if active_other is not None:
             await interaction.response.send_message(
                 f"{user_id}は別のチャンネル(ID: {active_other})でラウンド進行中です。"
@@ -444,7 +493,7 @@ class BlackjackBot:
                 ephemeral=True
             )
             return
-        game = self.get_game(channel_id)
+        game = self.get_game(channel_id, guild_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
         # 既にユーザーが存在する場合は次のラウンドへの再参加として扱う
@@ -465,14 +514,14 @@ class BlackjackBot:
                 )
                 return
             # 十分なコインがあるか確認
-            if player['coins'] < 1:
+            if game._get_coins(user_id) < 1:
                 await interaction.response.send_message(
                     f"{user_id}は所持コインが不足しているため新しいラウンドに参加できません。",
                     ephemeral=True
                 )
                 return
             # 新しいラウンドとしてベットを差し引き、ステータスを初期化しカードを配る
-            player['coins'] -= 1
+            game._adjust_coins(user_id, -1)
             player['bet'] = 1
             player['status'] = 'playing'
             player['has_raised'] = False
@@ -493,7 +542,7 @@ class BlackjackBot:
                 player['natural_bonus'] = bonus
             # メッセージを作成
             score = player['score']
-            coins = player['coins']
+            coins = game._get_coins(user_id)
             public_response = (
                 f"{user_id}が新しいラウンドに参加しました。公開手札: "
                 f"{game.hand_to_public_string(hand)} | 所持コイン: {coins}"
@@ -517,7 +566,7 @@ class BlackjackBot:
         # メッセージを準備
         hand = game.users[user_id]['hand']
         score = game.users[user_id]['score']
-        coins = game.users[user_id]['coins']
+        coins = game._get_coins(user_id)
         # 公開メッセージにも所持コインを表示する
         public_response = (
             f"{user_id}がゲームに参加しました。公開手札: "
@@ -533,9 +582,10 @@ class BlackjackBot:
 
     async def command_bj_hit(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
+        guild_id = interaction.guild_id
         # 表示名を使用
         user_id = interaction.user.display_name
-        game = self.get_game(channel_id)
+        game = self.get_game(channel_id, guild_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
         if user_id not in game.users:
@@ -564,7 +614,7 @@ class BlackjackBot:
             await self._check_auto_allstand(interaction, channel_id)
         else:
             # 引いたカードと現在の手札、スコア、所持コインを含めたメッセージを作成
-            coins = player['coins']
+            coins = game._get_coins(user_id)
             private_response = (f"あなたが引いたカード: {game.card_to_string(card)}\n"
                                 f"あなたの全手札: {game.hand_to_string(hand)} スコア: {score}\n"
                                 f"現在の所持コイン: {coins}")
@@ -582,9 +632,10 @@ class BlackjackBot:
         他のプレイヤーにインタラクティブなボタンでコールかフォールドを選択させます。
         """
         channel_id = interaction.channel_id
+        guild_id = interaction.guild_id
         # 表示名を使用
         user_id = interaction.user.display_name
-        game = self.get_game(channel_id)
+        game = self.get_game(channel_id, guild_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
         # プレイヤーがゲームに参加していることを確認
@@ -648,7 +699,7 @@ class BlackjackBot:
                 hand_str = game.hand_to_public_string(state['hand'])
             else:
                 hand_str = "[伏せられています]"
-            player_states.append(f"{uid}: 手札: {hand_str} | コイン: {state['coins']}")
+            player_states.append(f"{uid}: 手札: {hand_str} | コイン: {game._get_coins(uid)}")
         state_message = "\n".join(player_states)
         raise_message = (f"{user_id}が{amount}コインをレイズしました。\n"
                          f"他のプレイヤーは60秒以内にCallかFoldを選択してください。\n"
@@ -668,7 +719,7 @@ class BlackjackBot:
             messages = []
             for uid in auto_folded:
                 hand_str = game.hand_to_public_string(game.users[uid]['hand'])
-                coins_remain = game.users[uid]['coins']
+                coins_remain = game._get_coins(uid)
                 messages.append(
                     f"{uid}は時間切れのため自動的にフォールドしました。公開手札: {hand_str} | コイン: {coins_remain}"
                 )
@@ -680,7 +731,8 @@ class BlackjackBot:
 
     async def command_bj_allstand(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
-        game = self.get_game(channel_id)
+        guild_id = interaction.guild_id
+        game = self.get_game(channel_id, guild_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
         # レイズ受付中はオールスタンドを許可しない
@@ -737,9 +789,10 @@ class BlackjackBot:
 
     async def command_bj_show(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
+        guild_id = interaction.guild_id
         # 表示名を使用
         user_id = interaction.user.display_name
-        game = self.get_game(channel_id)
+        game = self.get_game(channel_id, guild_id)
         # 必要であれば毎日コインをリセットする処理を適用
         game.check_and_reset_coins()
         if user_id not in game.users:
@@ -749,7 +802,7 @@ class BlackjackBot:
         state = game.users[user_id]
         hand = state['hand']
         score = state['score']
-        coins = state['coins']
+        coins = game._get_coins(user_id)
         # 自身の手札とコイン
         lines = [
             f"{user_id}の現在の手札: {game.hand_to_string(hand)}",
@@ -764,7 +817,7 @@ class BlackjackBot:
                 other_hand_str = game.hand_to_public_string(other_state['hand'])
             else:
                 other_hand_str = "[伏せられています]"
-            lines.append(f"{uid}の公開手札: {other_hand_str} | 所持コイン: {other_state['coins']}")
+            lines.append(f"{uid}の公開手札: {other_hand_str} | 所持コイン: {game._get_coins(uid)}")
         response = "\n".join(lines)
         await interaction.response.send_message(response,
                                                ephemeral=True)
@@ -774,7 +827,7 @@ class BlackjackBot:
         すべてのプレイヤーがバーストまたはフォールドしている場合、
         自動的にラウンドを終了して結果を送信します。ヒット後に呼び出されます。
         """
-        game = self.get_game(channel_id)
+        game = self.get_game(channel_id, interaction.guild_id)
         # アクティブなプレイヤー（バーストやフォールドしていないプレイヤー）を判定
         active_players = [state for state in game.users.values()
                           if state['status'] in ['playing', 'stand'] and not state['is_folded']]
@@ -842,7 +895,7 @@ class CallFoldView(discord.ui.View):
         self.responses[user_id] = action
         # プレイヤーの公開手札と所持コインを含めたメッセージを送信
         hand_str = self.game.hand_to_public_string(self.game.users[user_id]['hand'])
-        coins = self.game.users[user_id]['coins']
+        coins = self.game._get_coins(user_id)
         if action == 'call':
             msg = f"{user_id}がコールしました。公開手札: {hand_str} | コイン: {coins}"
         else:
