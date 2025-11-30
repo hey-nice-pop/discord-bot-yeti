@@ -487,9 +487,10 @@ class BlackjackBot:
         # 別チャンネルで進行中のラウンドに参加している場合は拒否
         active_other = self.find_active_channel_for_user(user_id, exclude_channel=channel_id, guild_id=guild_id)
         if active_other is not None:
+            guild_for_link = self.channel_guild.get(active_other, guild_id)
+            channel_url = f"https://discord.com/channels/{guild_for_link}/{active_other}" if guild_for_link else f"https://discord.com/channels/@me/{active_other}"
             await interaction.response.send_message(
-                f"{user_id}は別のチャンネル(ID: {active_other})でラウンド進行中です。"
-                "先にそちらを終了してください。",
+                f"{user_id}は別のチャンネル( {channel_url} )でラウンド進行中です。先にそちらを終了してください。",
                 ephemeral=True
             )
             return
