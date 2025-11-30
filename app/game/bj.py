@@ -202,6 +202,13 @@ class BlackjackBot:
             await interaction.response.send_message(f"{user_id}はすでにバーストまたはフォールドしています。",
                                                    ephemeral=True)
             return
+        # レイズ受付中はヒットできない
+        if game.current_raise > 0:
+            await interaction.response.send_message(
+                "現在レイズの受付中です。全員が Call/Fold を選択（またはタイムアウト処理）するまでヒットできません。",
+                ephemeral=True
+            )
+            return
         # 引くカードが残っていることを確認
         if not game.deck:
             await interaction.response.send_message("山札が残っていないためカードを引けません。",
@@ -241,6 +248,7 @@ class BlackjackBot:
                 description=f"{user_id} がカードを引きました。",
                 fields=[
                     ("公開手札", game.hand_to_public_string(hand), False),
+                    ("所持コイン", str(coins), True),
                 ]
             )
             await interaction.response.send_message(embed=public_embed, ephemeral=False)
@@ -333,7 +341,7 @@ class BlackjackBot:
         # メッセージとインタラクティブビューを送信
         raise_embed = self._make_embed(
             title="レイズが行われました",
-            description=f"{user_id} が {amount} コインをレイズしました。",
+            description=f"{user_id} が {amount} コインをレイズしました。\n60秒以内に Call / Fold を選択してください。",
             fields=[
                 ("現在のポット", f"{game.pot} コイン", True),
                 ("レイズ額", f"{amount} コイン", True),
@@ -360,9 +368,36 @@ class BlackjackBot:
                 color=discord.Color.dark_gray()
             )
             await interaction.followup.send(embed=auto_fold_embed, ephemeral=False)
-        # 受付終了のメッセージを表示
-        await interaction.followup.send("受付が終了しました。",
-                                       ephemeral=False)
+        # 受付終了のメッセージ（各プレイヤーの行動と状態を含める）
+        player_lines = []
+        for uid, state in game.users.items():
+            # 行動のラベルを決定
+            if uid == user_id:
+                action_label = "レイズ"
+            elif uid in view.responses:
+                action_label = "コール" if view.responses[uid] == "call" else "フォールド"
+            elif uid in auto_folded:
+                action_label = "フォールド（時間切れ）"
+            else:
+                action_label = "未応答"
+            # 手札表示（フォールドしていない場合は1枚伏せで公開）
+            if not state['is_folded']:
+                hand_str = game.hand_to_public_string(state['hand'])
+            else:
+                hand_str = "[伏せられています]"
+            coins_now = game._get_coins(uid)
+            player_lines.append(f"{uid}: {action_label} | 手札: {hand_str} | コイン: {coins_now}")
+        summary_embed = self._make_embed(
+            title="レイズ受付が終了しました",
+            description="各プレイヤーの結果をまとめました。",
+            fields=[
+                ("プレイヤー状態", "\n".join(player_lines), False),
+                ("現在のポット", f"{game.pot} コイン", True),
+                ("レイズ額", f"{game.current_raise} コイン", True),
+            ],
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=summary_embed, ephemeral=False)
 
     async def command_bj_allstand(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
@@ -441,21 +476,24 @@ class BlackjackBot:
         hand = state['hand']
         score = state['score']
         coins = game._get_coins(user_id)
-        # 自身の手札とコイン
+        # 自身の手札・コイン・ステータス
         lines = [
             f"{user_id}の現在の手札: {game.hand_to_string(hand)}",
-            f"スコア: {score} | 所持コイン: {coins}"
+            f"ステータス: {state['status']} | スコア: {score} | 所持コイン: {coins}"
         ]
         # 他プレイヤーの公開手札と所持コインを表示
         for uid, other_state in game.users.items():
             if uid == user_id:
                 continue
+            status_label = other_state['status']
             # フォールドしていない場合は先頭カードを伏せて表示
             if not other_state['is_folded']:
                 other_hand_str = game.hand_to_public_string(other_state['hand'])
             else:
                 other_hand_str = "[伏せられています]"
-            lines.append(f"{uid}の公開手札: {other_hand_str} | 所持コイン: {game._get_coins(uid)}")
+            lines.append(
+                f"{uid}の公開手札: {other_hand_str} | ステータス: {status_label} | 所持コイン: {game._get_coins(uid)}"
+            )
         response = "\n".join(lines)
         show_embed = self._make_embed(
             title="現在の手札とコイン",
