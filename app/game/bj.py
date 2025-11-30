@@ -446,6 +446,15 @@ class BlackjackBot:
     # ------------------------------------------------------------------
     # 補助メソッド
     # ------------------------------------------------------------------
+    def _make_embed(self, title: str, description: str = "", fields: list[tuple[str, str, bool]] | None = None,
+                    color: discord.Color | int = discord.Color.blurple()) -> discord.Embed:
+        """Embed を生成する簡易ヘルパー。fields は (name, value, inline) のタプル。"""
+        embed = discord.Embed(title=title, description=description, color=color)
+        if fields:
+            for name, value, inline in fields:
+                embed.add_field(name=name, value=value, inline=inline)
+        return embed
+
     def get_game(self, channel_id: int, guild_id: int | None = None) -> Blackjack:
         """指定されたチャンネルに対応するブラックジャックゲームを取得、または新規作成します。"""
         wallet_key = guild_id if guild_id is not None else "__global__"
@@ -544,17 +553,26 @@ class BlackjackBot:
             # メッセージを作成
             score = player['score']
             coins = game._get_coins(user_id)
-            public_response = (
-                f"{user_id}が新しいラウンドに参加しました。公開手札: "
-                f"{game.hand_to_public_string(hand)} | 所持コイン: {coins}"
+            public_embed = self._make_embed(
+                title="ブラックジャックに参加しました",
+                description=f"{user_id} が新しいラウンドに参加しました。",
+                fields=[
+                    ("公開手札", game.hand_to_public_string(hand), True),
+                    ("所持コイン", str(coins), True),
+                ]
             )
-            private_response = (
-                f"{user_id}が新しいラウンドに参加し、初期カードを受け取りました！\n"
-                f"あなたの手札: {game.hand_to_string(hand)} スコア: {score}\n"
-                f"現在の所持コイン: {coins}"
+            private_embed = self._make_embed(
+                title="あなたの初期カード",
+                description="カードを2枚配りました。",
+                fields=[
+                    ("あなたの手札", game.hand_to_string(hand), False),
+                    ("スコア", str(score), True),
+                    ("所持コイン", str(coins), True),
+                ],
+                color=discord.Color.green()
             )
-            await interaction.response.send_message(public_response, ephemeral=False)
-            await interaction.followup.send(private_response, ephemeral=True)
+            await interaction.response.send_message(embed=public_embed, ephemeral=False)
+            await interaction.followup.send(embed=private_embed, ephemeral=True)
             return
         # 新規参加者の場合は通常の参加処理
         if not game.add_user(user_id):
@@ -568,18 +586,26 @@ class BlackjackBot:
         hand = game.users[user_id]['hand']
         score = game.users[user_id]['score']
         coins = game._get_coins(user_id)
-        # 公開メッセージにも所持コインを表示する
-        public_response = (
-            f"{user_id}がゲームに参加しました。公開手札: "
-            f"{game.hand_to_public_string(hand)} | 所持コイン: {coins}"
+        public_embed = self._make_embed(
+            title="ブラックジャックに参加しました",
+            description=f"{user_id} がゲームに参加しました。",
+            fields=[
+                ("公開手札", game.hand_to_public_string(hand), True),
+                ("所持コイン", str(coins), True),
+            ]
         )
-        private_response = (
-            f"{user_id}がゲームに参加し、初期カードを受け取りました！\n"
-            f"あなたの手札: {game.hand_to_string(hand)} スコア: {score}\n"
-            f"現在の所持コイン: {coins}"
+        private_embed = self._make_embed(
+            title="あなたの初期カード",
+            description="カードを2枚配りました。",
+            fields=[
+                ("あなたの手札", game.hand_to_string(hand), False),
+                ("スコア", str(score), True),
+                ("所持コイン", str(coins), True),
+            ],
+            color=discord.Color.green()
         )
-        await interaction.response.send_message(public_response, ephemeral=False)
-        await interaction.followup.send(private_response, ephemeral=True)
+        await interaction.response.send_message(embed=public_embed, ephemeral=False)
+        await interaction.followup.send(embed=private_embed, ephemeral=True)
 
     async def command_bj_hit(self, interaction: discord.Interaction):
         channel_id = interaction.channel_id
@@ -608,21 +634,40 @@ class BlackjackBot:
         hand = player['hand']
         status, score = game.get_user_status(user_id)
         if status == 'bust':
-            public_response = (f"{user_id}はバーストしました！公開手札: "
-                                f"{game.hand_to_string(hand)} スコア: {score}")
-            await interaction.response.send_message(public_response, ephemeral=False)
+            public_embed = self._make_embed(
+                title="バーストしました",
+                description=f"{user_id} はバーストしました！",
+                fields=[
+                    ("公開手札", game.hand_to_string(hand), False),
+                    ("スコア", str(score), True),
+                ],
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=public_embed, ephemeral=False)
             # 全員バーストしたかどうかをチェックして自動的に終了する
             await self._check_auto_allstand(interaction, channel_id)
         else:
             # 引いたカードと現在の手札、スコア、所持コインを含めたメッセージを作成
             coins = game._get_coins(user_id)
-            private_response = (f"あなたが引いたカード: {game.card_to_string(card)}\n"
-                                f"あなたの全手札: {game.hand_to_string(hand)} スコア: {score}\n"
-                                f"現在の所持コイン: {coins}")
-            public_response = (f"{user_id}がカードを引きました。公開手札: "
-                               f"{game.hand_to_public_string(hand)}")
-            await interaction.response.send_message(public_response, ephemeral=False)
-            await interaction.followup.send(private_response, ephemeral=True)
+            private_embed = self._make_embed(
+                title="カードを引きました",
+                description=f"あなたが引いたカード: {game.card_to_string(card)}",
+                fields=[
+                    ("あなたの手札", game.hand_to_string(hand), False),
+                    ("スコア", str(score), True),
+                    ("所持コイン", str(coins), True),
+                ],
+                color=discord.Color.green()
+            )
+            public_embed = self._make_embed(
+                title="カードを引きました",
+                description=f"{user_id} がカードを引きました。",
+                fields=[
+                    ("公開手札", game.hand_to_public_string(hand), False),
+                ]
+            )
+            await interaction.response.send_message(embed=public_embed, ephemeral=False)
+            await interaction.followup.send(embed=private_embed, ephemeral=True)
             # ヒット後に全員バーストしたかどうかをチェック
             await self._check_auto_allstand(interaction, channel_id)
 
@@ -709,8 +754,17 @@ class BlackjackBot:
         # コール/フォールド応答用のインタラクティブビューを定義
         view = CallFoldView(game, user_id, other_players)
         # メッセージとインタラクティブビューを送信
-        await interaction.response.send_message(raise_message, view=view, 
-                                               ephemeral=False)
+        raise_embed = self._make_embed(
+            title="レイズが行われました",
+            description=f"{user_id} が {amount} コインをレイズしました。",
+            fields=[
+                ("現在のポット", f"{game.pot} コイン", True),
+                ("レイズ額", f"{amount} コイン", True),
+                ("プレイヤー状態", state_message, False),
+            ],
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=raise_embed, view=view, ephemeral=False)
         # View が終了するまで待機し、終了後に締め切りメッセージを送信
         await view.wait()
         # 未応答のプレイヤーを自動的にフォールドさせた旨を通知
@@ -721,11 +775,14 @@ class BlackjackBot:
             for uid in auto_folded:
                 hand_str = game.hand_to_public_string(game.users[uid]['hand'])
                 coins_remain = game._get_coins(uid)
-                messages.append(
-                    f"{uid}は時間切れのため自動的にフォールドしました。公開手札: {hand_str} | コイン: {coins_remain}"
-                )
-            await interaction.followup.send("\n".join(messages),
-                                           ephemeral=False)
+                messages.append(f"{uid}: {hand_str} | コイン: {coins_remain}")
+            auto_fold_embed = self._make_embed(
+                title="時間切れで自動フォールド",
+                description="以下のプレイヤーは時間切れのためフォールドしました。",
+                fields=[("プレイヤー", "\n".join(messages), False)],
+                color=discord.Color.dark_gray()
+            )
+            await interaction.followup.send(embed=auto_fold_embed, ephemeral=False)
         # 受付終了のメッセージを表示
         await interaction.followup.send("受付が終了しました。",
                                        ephemeral=False)
@@ -782,10 +839,13 @@ class BlackjackBot:
             result_lines.append(
                 "※ 初手がブラックジャック（Aと10点カード：10/J/Q/K）の場合、システムから5コインが付与されます。"
             )
-        await interaction.response.send_message(
-            "\n".join(result_lines),
-            ephemeral=False
+        result_embed = self._make_embed(
+            title="ラウンド結果",
+            description=message,
+            fields=[("詳細", "\n".join(result_lines[1:]), False)],
+            color=discord.Color.gold()
         )
+        await interaction.response.send_message(embed=result_embed, ephemeral=False)
         # resolve_round 内でゲーム状態はリセットされるため、ゲームインスタンスは保持します
 
     async def command_bj_show(self, interaction: discord.Interaction):
@@ -820,8 +880,13 @@ class BlackjackBot:
                 other_hand_str = "[伏せられています]"
             lines.append(f"{uid}の公開手札: {other_hand_str} | 所持コイン: {game._get_coins(uid)}")
         response = "\n".join(lines)
-        await interaction.response.send_message(response,
-                                               ephemeral=True)
+        show_embed = self._make_embed(
+            title="現在の手札とコイン",
+            description=f"{user_id} の状況を表示します。",
+            fields=[("詳細", response, False)],
+            color=discord.Color.teal()
+        )
+        await interaction.response.send_message(embed=show_embed, ephemeral=True)
 
     async def _check_auto_allstand(self, interaction: discord.Interaction, channel_id: int):
         """
@@ -837,7 +902,7 @@ class BlackjackBot:
             # ラウンドを解決
             message, summary = game.resolve_round()
             # 結果メッセージを作成
-            result_lines = [message]
+            result_lines = []
             for result in summary:
                 uid = result['user_id']
                 hand = result['hand']
@@ -848,9 +913,14 @@ class BlackjackBot:
                 result_lines.append(
                     f"{uid}: 手札: {hand} | スコア: {score} | 最終コイン: {final_coins} ({change_str})"
                 )
+            auto_result_embed = self._make_embed(
+                title="全員バーストにより終了",
+                description=message,
+                fields=[("詳細", "\n".join(result_lines), False)],
+                color=discord.Color.gold()
+            )
             # 結果をチャンネルへ送信
-            await interaction.followup.send("\n".join(result_lines),
-                                           ephemeral=False)
+            await interaction.followup.send(embed=auto_result_embed, ephemeral=False)
             # resolve_round でゲーム状態はリセットされるため、ゲームインスタンスは保持します
 
 
