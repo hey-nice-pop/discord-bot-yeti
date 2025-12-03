@@ -197,6 +197,13 @@ class BlackjackBot:
                                                    ephemeral=True)
             return
         player = game.users[user_id]
+        # ラウンドが進行していない場合はヒットできない
+        if player['status'] == 'ready' or not player['hand']:
+            await interaction.response.send_message(
+                "現在進行中のラウンドがありません。/bj_start でラウンドを開始してください。",
+                ephemeral=True
+            )
+            return
         # プレイヤーがフォールドまたはバーストしている場合はヒットできない
         if player['is_folded'] or player['status'] != 'playing':
             await interaction.response.send_message(f"{user_id}はすでにバーストまたはフォールドしています。",

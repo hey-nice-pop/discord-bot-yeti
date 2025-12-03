@@ -330,16 +330,25 @@ class Blackjack:
         """
         # 結果リストを初期化
         results = []
+        # 今ラウンドに参加しているプレイヤーのみを対象とする（ready のままの過去参加者を除外）
+        round_players = {
+            uid: state for uid, state in self.users.items()
+            if state.get('status') != 'ready' or state.get('bet', 0) > 0 or state.get('hand')
+        }
+        if not round_players:
+            # 想定外だが、安全のために早期リセットする
+            self.reset_game()
+            return "進行中のプレイヤーがいません。", results
         # ラウンド開始時の各プレイヤーのコイン残高を記録する（ベットやボーナスを加算する前）
-        initial_coins = {uid: self._get_coins(uid) for uid, state in self.users.items()}
+        initial_coins = {uid: self._get_coins(uid) for uid in round_players}
         # 現在アクティブなプレイヤー（バーストやフォールドしていないプレイヤー）を取得
-        active_players = [uid for uid, state in self.users.items()
+        active_players = [uid for uid, state in round_players.items()
                           if state['status'] in ['playing', 'stand'] and not state['is_folded']]
         # 全員がバーストまたはフォールドしている場合の処理
         if not active_players:
             # 各プレイヤーにベットを返却する。全員がバーストまたはフォールドしている
             # 場合はナチュラルBJボーナスは付与しません。
-            for uid, state in self.users.items():
+            for uid, state in round_players.items():
                 # ベットの返却
                 self._adjust_coins(uid, state['bet'])
                 state['bet'] = 0
@@ -348,7 +357,7 @@ class Blackjack:
             # 結果メッセージ
             message = "勝者なし、全員バーストしました。"
             # 各プレイヤーの増減を計算して結果リストに追加
-            for uid, state in self.users.items():
+            for uid, state in round_players.items():
                 change = self._get_coins(uid) - initial_coins[uid]
                 results.append({
                     'user_id': uid,
@@ -374,13 +383,13 @@ class Blackjack:
             if i < remainder:
                 self._adjust_coins(uid, 1)
         # ナチュラルBJボーナスがある場合はここで付与する
-        for uid, state in self.users.items():
+        for uid, state in round_players.items():
             bonus = state.get('natural_bonus', 0)
             # バーストまたはフォールドしていないプレイヤーのみボーナスを受け取る
             if bonus and state['status'] != 'bust' and not state['is_folded']:
                 self._adjust_coins(uid, bonus)
         # 各プレイヤーの増減を計算して結果リストに追加
-        for uid, state in self.users.items():
+        for uid, state in round_players.items():
             change = self._get_coins(uid) - initial_coins[uid]
             results.append({
                 'user_id': uid,
