@@ -225,12 +225,14 @@ class BlackjackBot:
         hand = player['hand']
         status, score = game.get_user_status(user_id)
         if status == 'bust':
+            coins = game._get_coins(user_id)
             public_embed = self._make_embed(
                 title="バーストしました",
                 description=f"{user_id} はバーストしました！",
                 fields=[
                     ("公開手札", game.hand_to_string(hand), False),
                     ("スコア", str(score), True),
+                    ("所持コイン", str(coins), True),
                 ],
                 color=discord.Color.red()
             )
@@ -400,7 +402,6 @@ class BlackjackBot:
             fields=[
                 ("プレイヤー状態", "\n".join(player_lines), False),
                 ("現在のポット", f"{game.pot} コイン", True),
-                ("レイズ額", f"{game.current_raise} コイン", True),
             ],
             color=discord.Color.blue()
         )

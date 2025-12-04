@@ -244,8 +244,13 @@ class Blackjack:
         # レイズ額はレイズするプレイヤー自身の所持コインを超えない
         raiser_coins = self._get_coins(raiser_id)
         # フォールド/バーストしていない他プレイヤーの最小所持コインを上限計算に使う
-        active_players = [uid for uid, state in self.users.items()
-                          if not state['is_folded'] and uid != raiser_id]
+        # ready（未参加）状態のプレイヤーは次ラウンド未参加なので除外する
+        active_players = [
+            uid for uid, state in self.users.items()
+            if not state['is_folded']
+            and state['status'] in ['playing', 'stand']
+            and uid != raiser_id
+        ]
         if not active_players:
             return raiser_coins
         min_other_coins = min(self._get_coins(uid) for uid in active_players)
