@@ -87,9 +87,9 @@ class BlackjackBot:
         if user_id in game.users:
             player = game.users[user_id]
             # 現在のステータスが playing または stand であり手札が残っている場合はラウンド継続中
-            if player['status'] in ['playing', 'stand'] and player['hand']:
+            if player['hand'] and player['status'] in ['playing', 'stand', 'bust', 'fold']:
                 await interaction.response.send_message(
-                    f"{user_id}はすでにゲームに参加しています。",
+                    f"{user_id}はこのラウンドで既に行動済みです。ラウンド終了をお待ちください。",
                     ephemeral=True
                 )
                 return
@@ -387,6 +387,8 @@ class BlackjackBot:
                 action_label = "コール" if view.responses[uid] == "call" else "フォールド"
             elif uid in auto_folded:
                 action_label = "フォールド（時間切れ）"
+            elif state['status'] == 'bust':
+                action_label = "バースト"
             else:
                 action_label = "未応答"
             # 手札表示（フォールドしていない場合は1枚伏せで公開）
